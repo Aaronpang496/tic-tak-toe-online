@@ -1,5 +1,5 @@
 # app.py
-import asyncio, json, queue, threading
+import asyncio, json, queue, threading, time
 import streamlit as st
 import websockets
 
@@ -26,6 +26,10 @@ if "ws_started" not in st.session_state:
     st.session_state.ws_started = False
 if "difficulty" not in st.session_state:
     st.session_state.difficulty = "hard"
+if "show_difficulty" not in st.session_state:
+    st.session_state.show_difficulty = False
+if "ai_sent_at" not in st.session_state:
+    st.session_state.ai_sent_at = None
 
 # ---------- websocket thread ----------
 def ws_thread(q, outbox):
@@ -61,6 +65,8 @@ def reset_session():
     st.session_state.name = None
     st.session_state.page = "landing"
     st.session_state.ws_started = False
+    st.session_state.show_difficulty = False
+    st.session_state.ai_sent_at = None
 
 def drain_queue():
     while not st.session_state.q.empty():
@@ -118,6 +124,33 @@ def online_board():
         else:
             st.caption("Ready to play — someone else is here!")
 
+@st.dialog("Choose AI difficulty")
+def difficulty_dialog():
+    st.write("How tough should the bot be?")
+    choice = st.radio(
+        "Difficulty",
+        options=["easy", "medium", "hard"],
+        index=["easy", "medium", "hard"].index(st.session_state.difficulty),
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.caption({
+        "easy": "🎲 Random moves — great for beginners.",
+        "medium": "🤔 50% optimal, 50% random — a fair challenge.",
+        "hard": "🧠 Perfect play — you can only draw at best.",
+    }[choice])
+
+    if st.button("Start AI game", type="primary", use_container_width=True):
+        st.session_state.difficulty = choice
+        st.session_state.show_difficulty = False
+        st.session_state.page = "waiting_ai"
+        st.session_state.ai_sent_at = time.time()
+        st.session_state.outbox.put({
+            "type": "play_ai",
+            "difficulty": choice,
+        })
+        st.rerun()
+
 def landing():
     start_ws()
 
@@ -142,33 +175,17 @@ def landing():
             st.rerun()
     with col2:
         if st.button("🤖 Play AI now", use_container_width=True):
-            st.session_state.page = "waiting_ai"
-            st.session_state.outbox.put({
-                "type": "set_mode",
-                "mode": "ai_now",
-                "difficulty": st.session_state.difficulty,
-            })
+            st.session_state.show_difficulty = True
             st.rerun()
 
-    st.write("**AI difficulty**")
-    st.session_state.difficulty = st.radio(
-        "Choose difficulty",
-        options=["easy", "medium", "hard"],
-        index=["easy", "medium", "hard"].index(st.session_state.difficulty),
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-    st.caption({
-        "easy": "🎲 Random moves — great for beginners.",
-        "medium": "🤔 50% optimal, 50% random — a fair challenge.",
-        "hard": "🧠 Perfect play — you can only draw at best.",
-    }[st.session_state.difficulty])
+    if st.session_state.show_difficulty:
+        difficulty_dialog()
 
     with st.expander("ℹ️ How it works"):
         st.write("""
         - You get a random codename when you enter.
         - **Wait for a human**: if someone joins within 3s → human match. Otherwise AI steps in (hard mode).
-        - **Play AI now**: skips waiting and starts a bot match at your chosen difficulty.
+        - **Play AI now**: opens a dialog to pick difficulty, then starts a bot match.
         - Hit **Exit** any time to leave.
         """)
 
@@ -180,27 +197,33 @@ def waiting_fragment():
     state = st.session_state.state
     pid = st.session_state.player_id
 
-    if st.session_state.page == "waiting_ai" and (
-        pid is None or not isinstance(state, dict)
-        or "players" not in state or not state.get("vs_ai")
-    ):
-        if "ai_pinged" not in st.session_state:
-            st.session_state.ai_pinged = True
-            st.session_state.outbox.put({
-                "type": "play_ai",
-                "difficulty": st.session_state.difficulty,
-            })
-        st.info("Starting AI game…")
+    # If AI game already started → go to game page
+    if isinstance(state, dict) and state.get("vs_ai"):
+        st.session_state.page = "game"
+        st.session_state.ai_sent_at = None
+        st.rerun()
         return
 
     if not isinstance(state, dict) or "players" not in state or pid is None:
         st.info("Connecting…")
         return
 
-    if pid in state["players"] or state.get("vs_ai"):
+    if pid in state["players"]:
         st.session_state.page = "game"
-        st.session_state.pop("ai_pinged", None)
+        st.session_state.ai_sent_at = None
         st.rerun()
+        return
+
+    # If we're on waiting_ai but AI hasn't started, resend after 2s
+    if st.session_state.page == "waiting_ai":
+        sent = st.session_state.ai_sent_at or 0
+        if time.time() - sent > 2:
+            st.session_state.ai_sent_at = time.time()
+            st.session_state.outbox.put({
+                "type": "play_ai",
+                "difficulty": st.session_state.difficulty,
+            })
+        st.info("Starting AI game…")
         return
 
     st.markdown("### 🟡 Waiting for an opponent…")
@@ -213,15 +236,16 @@ def waiting_fragment():
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🤖 Play AI instead", use_container_width=True):
-            st.session_state.outbox.put({
-                "type": "play_ai",
-                "difficulty": st.session_state.difficulty,
-            })
+            st.session_state.show_difficulty = True
+            st.rerun()
     with col2:
         if st.button("🚪 Cancel", use_container_width=True):
             st.session_state.outbox.put({"type": "exit"})
             reset_session()
             st.rerun()
+
+    if st.session_state.show_difficulty:
+        difficulty_dialog()
 
 # ---------- GAME ----------
 @st.fragment(run_every=0.5)
