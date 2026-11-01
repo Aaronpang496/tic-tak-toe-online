@@ -13,7 +13,6 @@ HUMAN_NAMES = [
 ]
 AI_NAMES = ["Bot-Zeta", "Cortex-9", "NovaMind", "GlitchBot", "SynthCore",
             "Echo-7", "QuantumOwl", "PrimeBit"]
-
 WIN_SCORE = 10
 
 def pick_human_name(taken):
@@ -103,51 +102,34 @@ def _finish_or_pass(s, sym):
     else:
         s["turn"] = P2 if s["turn"] == P1 else P1
 
-# ---------- AI ----------
-
 def _pick_ai_move(board, ai_sym, difficulty="hard"):
     human_sym = P1 if ai_sym == P2 else P2
     b = [row[:] for row in board]
     empties = [(r, c) for r in range(3) for c in range(3) if b[r][c] == EMPTY]
     if not empties:
         return None
-
-    # Easy: random move
     if difficulty == "easy":
         return random.choice(empties)
-
-    # Medium: 50% random, 50% perfect
     if difficulty == "medium" and random.random() < 0.5:
         return random.choice(empties)
-
-    # Hard: full minimax + alpha-beta
+    
     best_score = -float("inf")
     best_move = None
-
     order = [(1, 1), (0, 0), (0, 2), (2, 0), (2, 2), (0, 1), (1, 0), (1, 2), (2, 1)]
     ordered = [m for m in order if m in empties]
-
     for r, c in ordered:
         b[r][c] = ai_sym
-        score = _minimax(b, depth=0, is_max=False,
-                         alpha=-float("inf"), beta=float("inf"),
-                         ai=ai_sym, human=human_sym)
+        score = _minimax(b, 0, False, -float("inf"), float("inf"), ai_sym, human_sym)
         b[r][c] = EMPTY
         if score > best_score:
             best_score = score
             best_move = (r, c)
-
     return best_move
 
-
 def _minimax(b, depth, is_max, alpha, beta, ai, human):
-    if check_win(b, ai):
-        return WIN_SCORE - depth
-    if check_win(b, human):
-        return -WIN_SCORE + depth
-    if all(b[r][c] != EMPTY for r in range(3) for c in range(3)):
-        return 0
-
+    if check_win(b, ai): return WIN_SCORE - depth
+    if check_win(b, human): return -WIN_SCORE + depth
+    if all(b[r][c] != EMPTY for r in range(3) for c in range(3)): return 0
     if is_max:
         best = -float("inf")
         for r in range(3):
@@ -158,10 +140,8 @@ def _minimax(b, depth, is_max, alpha, beta, ai, human):
                     b[r][c] = EMPTY
                     best = max(best, val)
                     alpha = max(alpha, best)
-                    if beta <= alpha:
-                        break
-            if beta <= alpha:
-                break
+                    if beta <= alpha: break
+            if beta <= alpha: break
         return best
     else:
         best = float("inf")
@@ -173,13 +153,9 @@ def _minimax(b, depth, is_max, alpha, beta, ai, human):
                     b[r][c] = EMPTY
                     best = min(best, val)
                     beta = min(beta, best)
-                    if beta <= alpha:
-                        break
-            if beta <= alpha:
-                break
+                    if beta <= alpha: break
+            if beta <= alpha: break
         return best
-
-# ---------- Win check ----------
 
 def check_win(b, sym):
     for i in range(3):
