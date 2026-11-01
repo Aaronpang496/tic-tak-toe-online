@@ -24,6 +24,8 @@ if "page" not in st.session_state:
     st.session_state.page = "landing"
 if "ws_started" not in st.session_state:
     st.session_state.ws_started = False
+if "difficulty" not in st.session_state:
+    st.session_state.difficulty = "hard"
 
 # ---------- websocket thread ----------
 def ws_thread(q, outbox):
@@ -61,7 +63,6 @@ def reset_session():
     st.session_state.ws_started = False
 
 def drain_queue():
-    """Pull all pending WS messages into session state."""
     while not st.session_state.q.empty():
         msg = st.session_state.q.get()
         if msg["type"] == "welcome":
@@ -118,7 +119,6 @@ def online_board():
             st.caption("Ready to play — someone else is here!")
 
 def landing():
-    # Connect immediately so online list is live even before clicking Play
     start_ws()
 
     st.markdown("""
@@ -143,14 +143,32 @@ def landing():
     with col2:
         if st.button("🤖 Play AI now", use_container_width=True):
             st.session_state.page = "waiting_ai"
-            st.session_state.outbox.put({"type": "set_mode", "mode": "ai_now"})
+            st.session_state.outbox.put({
+                "type": "set_mode",
+                "mode": "ai_now",
+                "difficulty": st.session_state.difficulty,
+            })
             st.rerun()
+
+    st.write("**AI difficulty**")
+    st.session_state.difficulty = st.radio(
+        "Choose difficulty",
+        options=["easy", "medium", "hard"],
+        index=["easy", "medium", "hard"].index(st.session_state.difficulty),
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.caption({
+        "easy": "🎲 Random moves — great for beginners.",
+        "medium": "🤔 50% optimal, 50% random — a fair challenge.",
+        "hard": "🧠 Perfect play — you can only draw at best.",
+    }[st.session_state.difficulty])
 
     with st.expander("ℹ️ How it works"):
         st.write("""
         - You get a random codename when you enter.
-        - **Wait for a human**: if someone joins within 3s → human match. Otherwise AI steps in.
-        - **Play AI now**: skips waiting and goes straight to a bot match.
+        - **Wait for a human**: if someone joins within 3s → human match. Otherwise AI steps in (hard mode).
+        - **Play AI now**: skips waiting and starts a bot match at your chosen difficulty.
         - Hit **Exit** any time to leave.
         """)
 
@@ -162,12 +180,26 @@ def waiting_fragment():
     state = st.session_state.state
     pid = st.session_state.player_id
 
+    if st.session_state.page == "waiting_ai" and (
+        pid is None or not isinstance(state, dict)
+        or "players" not in state or not state.get("vs_ai")
+    ):
+        if "ai_pinged" not in st.session_state:
+            st.session_state.ai_pinged = True
+            st.session_state.outbox.put({
+                "type": "play_ai",
+                "difficulty": st.session_state.difficulty,
+            })
+        st.info("Starting AI game…")
+        return
+
     if not isinstance(state, dict) or "players" not in state or pid is None:
         st.info("Connecting…")
         return
 
     if pid in state["players"] or state.get("vs_ai"):
         st.session_state.page = "game"
+        st.session_state.pop("ai_pinged", None)
         st.rerun()
         return
 
@@ -181,7 +213,10 @@ def waiting_fragment():
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🤖 Play AI instead", use_container_width=True):
-            st.session_state.outbox.put({"type": "play_ai"})
+            st.session_state.outbox.put({
+                "type": "play_ai",
+                "difficulty": st.session_state.difficulty,
+            })
     with col2:
         if st.button("🚪 Cancel", use_container_width=True):
             st.session_state.outbox.put({"type": "exit"})
@@ -215,7 +250,9 @@ def game_fragment():
     my_sym = "X" if state["players"].index(pid) == 0 else "O"
 
     if state.get("vs_ai"):
-        st.info(f"🤖 No human found — playing vs **{state.get('ai_name', 'AI')}** (O)")
+        diff = state.get("ai_difficulty", "hard")
+        emoji = {"easy": "🎲", "medium": "🤔", "hard": "🧠"}[diff]
+        st.info(f"{emoji} Playing vs **{state.get('ai_name', 'AI')}** (O) · difficulty: **{diff}**")
     else:
         opp_ids = [p for p in state["players"] if p != pid]
         opp_name = state["names"].get(opp_ids[0], "?") if opp_ids else "waiting…"
