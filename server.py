@@ -7,11 +7,10 @@ from game_logic import (
 )
 
 STATE = new_game()
-CLIENTS = {}          # ws -> player_id
-NAMES = {}            # player_id -> name
-CONNECTED = {}        # ws -> name   (who is online right now)
+CLIENTS = {}
+NAMES = {}
 AI_TASK = None
-MODE = "auto"         # "auto" (3s timer) or "ai_now"
+MODE = "auto"
 
 async def broadcast():
     online = [
@@ -32,7 +31,7 @@ async def maybe_start_ai():
         await asyncio.sleep(3)
         humans = list(STATE["players"])
         if len(humans) == 1 and not STATE["vs_ai"] and STATE["winner"] is None:
-            STATE = start_ai_game(STATE, humans[0])
+            STATE = start_ai_game(STATE, humans[0], "hard")
             await broadcast()
     except asyncio.CancelledError:
         pass
@@ -44,7 +43,6 @@ async def handler(ws):
     player_id = str(uuid.uuid4())[:8]
     CLIENTS[ws] = player_id
 
-    # If AI mode active and a real human joins, swap AI out for the human
     if STATE["vs_ai"] and len(STATE["players"]) == 1:
         AI_TASK and AI_TASK.cancel()
         AI_TASK = None
@@ -86,7 +84,8 @@ async def handler(ws):
                 for pid in list(CLIENTS.values()):
                     join(fresh, pid, STATE["names"].get(pid))
                 if len(CLIENTS) == 1:
-                    fresh = start_ai_game(fresh, next(iter(CLIENTS.values())))
+                    fresh = start_ai_game(fresh, next(iter(CLIENTS.values())),
+                                          STATE.get("ai_difficulty", "hard"))
                 STATE = fresh
                 AI_TASK and AI_TASK.cancel()
                 if len(CLIENTS) == 1 and MODE == "auto":
@@ -94,20 +93,25 @@ async def handler(ws):
                 await broadcast()
 
             elif msg["type"] == "play_ai":
-                # Player clicked "Play AI now" from landing
-                if player_id in STATE["players"]:
-                    AI_TASK and AI_TASK.cancel()
-                    AI_TASK = None
-                    STATE = start_ai_game(STATE, player_id)
-                    await broadcast()
+                # Player clicked "Play AI now" (from landing or waiting screen)
+                AI_TASK and AI_TASK.cancel()
+                AI_TASK = None
+                difficulty = msg.get("difficulty", "hard")
+                if player_id not in STATE["players"]:
+                    join(STATE, player_id)
+                    NAMES[player_id] = STATE["names"].get(player_id, "?")
+                STATE = start_ai_game(STATE, player_id, difficulty)
+                await broadcast()
 
             elif msg["type"] == "set_mode":
                 MODE = msg.get("mode", "auto")
-                if MODE == "ai_now" and len(STATE["players"]) == 1 and not STATE["vs_ai"]:
+                if MODE == "ai_now":
                     AI_TASK and AI_TASK.cancel()
                     AI_TASK = None
-                    STATE = start_ai_game(STATE, STATE["players"][0])
-                    await broadcast()
+                    difficulty = msg.get("difficulty", "hard")
+                    if player_id in STATE["players"]:
+                        STATE = start_ai_game(STATE, player_id, difficulty)
+                        await broadcast()
 
             elif msg["type"] == "exit":
                 CLIENTS.pop(ws, None)
