@@ -26,10 +26,6 @@ if "ws_started" not in st.session_state:
     st.session_state.ws_started = False
 if "difficulty" not in st.session_state:
     st.session_state.difficulty = "hard"
-if "show_difficulty" not in st.session_state:
-    st.session_state.show_difficulty = False
-if "ai_sent_at" not in st.session_state:
-    st.session_state.ai_sent_at = None
 
 # ---------- websocket thread ----------
 def ws_thread(q, outbox):
@@ -65,8 +61,6 @@ def reset_session():
     st.session_state.name = None
     st.session_state.page = "landing"
     st.session_state.ws_started = False
-    st.session_state.show_difficulty = False
-    st.session_state.ai_sent_at = None
 
 def drain_queue():
     while not st.session_state.q.empty():
@@ -110,7 +104,6 @@ st.markdown("""
 @st.fragment(run_every=0.5)
 def online_board():
     drain_queue()
-
     online = st.session_state.online
     if not online:
         st.info("No players online right now. You could be the first! 🚀")
@@ -119,10 +112,6 @@ def online_board():
             is_me = p["id"] == st.session_state.player_id
             label = f"🟢 **{p['name']}**" + (" *(you)*" if is_me else "")
             st.markdown(f"<div class='online-row'>{label}</div>", unsafe_allow_html=True)
-        if len(online) == 1:
-            st.caption("Waiting for a second player…")
-        else:
-            st.caption("Ready to play — someone else is here!")
 
 @st.dialog("Choose AI difficulty")
 def difficulty_dialog():
@@ -134,26 +123,16 @@ def difficulty_dialog():
         horizontal=True,
         label_visibility="collapsed",
     )
-    st.caption({
-        "easy": "🎲 Random moves — great for beginners.",
-        "medium": "🤔 50% optimal, 50% random — a fair challenge.",
-        "hard": "🧠 Perfect play — you can only draw at best.",
-    }[choice])
+    st.caption({"easy": "🎲 Random moves.", "medium": "🤔 50% optimal.", "hard": "🧠 Perfect play."}[choice])
 
     if st.button("Start AI game", type="primary", use_container_width=True):
         st.session_state.difficulty = choice
-        st.session_state.show_difficulty = False
         st.session_state.page = "waiting_ai"
-        st.session_state.ai_sent_at = time.time()
-        st.session_state.outbox.put({
-            "type": "play_ai",
-            "difficulty": choice,
-        })
+        st.session_state.outbox.put({"type": "play_ai", "difficulty": choice})
         st.rerun()
 
 def landing():
     start_ws()
-
     st.markdown("""
     <div class="hero">
       <h1>🎮 GRID CLASH</h1>
@@ -161,12 +140,9 @@ def landing():
       <div class="badge">🟣 Play a human if one shows up · otherwise a friendly AI</div>
     </div>
     """, unsafe_allow_html=True)
-
     st.subheader("👥 Who's online")
     online_board()
-
     st.divider()
-
     col1, col2 = st.columns(2)
     with col1:
         if st.button("👥 Wait for a human", use_container_width=True, type="primary"):
@@ -175,83 +151,44 @@ def landing():
             st.rerun()
     with col2:
         if st.button("🤖 Play AI now", use_container_width=True):
-            st.session_state.show_difficulty = True
-            st.rerun()
-
-    if st.session_state.show_difficulty:
-        difficulty_dialog()
-
+            difficulty_dialog()
     with st.expander("ℹ️ How it works"):
-        st.write("""
-        - You get a random codename when you enter.
-        - **Wait for a human**: if someone joins within 3s → human match. Otherwise AI steps in (hard mode).
-        - **Play AI now**: opens a dialog to pick difficulty, then starts a bot match.
-        - Hit **Exit** any time to leave.
-        """)
+        st.write("Pick a mode. If you wait and no one joins, the AI takes over.")
 
 # ---------- WAITING ----------
 @st.fragment(run_every=0.5)
 def waiting_fragment():
     drain_queue()
-
     state = st.session_state.state
     pid = st.session_state.player_id
 
-    # If AI game already started → go to game page
-    if isinstance(state, dict) and state.get("vs_ai"):
-        st.session_state.page = "game"
-        st.session_state.ai_sent_at = None
-        st.rerun()
-        return
+    # Jump to game if ready
+    if isinstance(state, dict) and "players" in state and pid is not None:
+        if pid in state["players"] or state.get("vs_ai"):
+            st.session_state.page = "game"
+            st.rerun()
+            return
 
     if not isinstance(state, dict) or "players" not in state or pid is None:
         st.info("Connecting…")
         return
 
-    if pid in state["players"]:
-        st.session_state.page = "game"
-        st.session_state.ai_sent_at = None
-        st.rerun()
-        return
-
-    # If we're on waiting_ai but AI hasn't started, resend after 2s
-    if st.session_state.page == "waiting_ai":
-        sent = st.session_state.ai_sent_at or 0
-        if time.time() - sent > 2:
-            st.session_state.ai_sent_at = time.time()
-            st.session_state.outbox.put({
-                "type": "play_ai",
-                "difficulty": st.session_state.difficulty,
-            })
-        st.info("Starting AI game…")
-        return
-
     st.markdown("### 🟡 Waiting for an opponent…")
     st.write(f"You are **{st.session_state.name}**")
-    online = st.session_state.online
-    st.write(f"Players online: **{len(online)}**")
-    for p in online:
-        st.markdown(f"- 🟢 {p['name']}")
-
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🤖 Play AI instead", use_container_width=True):
-            st.session_state.show_difficulty = True
-            st.rerun()
+            difficulty_dialog()
     with col2:
         if st.button("🚪 Cancel", use_container_width=True):
             st.session_state.outbox.put({"type": "exit"})
             reset_session()
             st.rerun()
 
-    if st.session_state.show_difficulty:
-        difficulty_dialog()
-
 # ---------- GAME ----------
 @st.fragment(run_every=0.5)
 def game_fragment():
     drain_queue()
-
     state = st.session_state.state
     pid = st.session_state.player_id
 
@@ -259,35 +196,28 @@ def game_fragment():
         st.info("Connecting…")
         return
 
-    st.markdown(
-        f"**You:** <span class='name-tag'>🧑 {st.session_state.name or '…'}</span>",
-        unsafe_allow_html=True,
-    )
-
     if pid not in state["players"]:
-        st.warning("Game full — try another tab.")
-        if st.button("⬅️ Back to lobby"):
+        st.warning("Game full or you left.")
+        if st.button("⬅️ Back"):
             reset_session()
             st.rerun()
         return
 
+    st.markdown(f"**You:** <span class='name-tag'>🧑 {st.session_state.name}</span>", unsafe_allow_html=True)
     my_sym = "X" if state["players"].index(pid) == 0 else "O"
 
     if state.get("vs_ai"):
         diff = state.get("ai_difficulty", "hard")
         emoji = {"easy": "🎲", "medium": "🤔", "hard": "🧠"}[diff]
-        st.info(f"{emoji} Playing vs **{state.get('ai_name', 'AI')}** (O) · difficulty: **{diff}**")
+        st.info(f"{emoji} Playing vs **{state.get('ai_name', 'AI')}** (O) · {diff}")
     else:
-        opp_ids = [p for p in state["players"] if p != pid]
-        opp_name = state["names"].get(opp_ids[0], "?") if opp_ids else "waiting…"
-        st.success(f"👥 Playing vs **{opp_name}** (human)")
+        opp = [p for p in state["players"] if p != pid]
+        opp_name = state["names"].get(opp[0], "?") if opp else "waiting…"
+        st.success(f"👥 Playing vs **{opp_name}**")
 
-    st.write(f"You are **{my_sym}** · turn: **{state['turn']}**")
+    st.write(f"Turn: **{state['turn']}**")
     if state["winner"]:
-        if state["winner"] == "draw":
-            st.warning("It's a draw!")
-        else:
-            st.success(f"🏆 Winner: **{state['winner']}**")
+        st.success(f"🏆 Winner: **{state['winner']}**") if state["winner"] != "draw" else st.warning("Draw!")
 
     my_turn = (state["turn"] == my_sym and not state["winner"])
     for r in range(3):
@@ -295,8 +225,7 @@ def game_fragment():
         for c in range(3):
             cell = state["board"][r][c]
             label = "·" if cell == "." else cell
-            if cols[c].button(label, key=f"c{r}{c}", use_container_width=True,
-                              disabled=not my_turn or cell != "."):
+            if cols[c].button(label, key=f"c{r}{c}", use_container_width=True, disabled=not my_turn or cell != "."):
                 st.session_state.outbox.put({"type": "move", "row": r, "col": c})
 
     st.divider()
