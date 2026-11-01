@@ -1,2 +1,2 @@
 streamlit>=1.37
-websockets>=12
+supabase>=2.0.0
