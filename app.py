@@ -8,16 +8,22 @@ WS_URL = "ws://localhost:8765"
 st.set_page_config(page_title="Grid Clash", page_icon="🎮", layout="centered")
 
 # ---------- session ----------
-defaults = {
-    "q": None, "outbox": None,
-    "state": None, "online": [],
-    "player_id": None, "name": None,
-    "page": "landing",
-    "ws_started": False,
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v if v is not None else (queue.Queue())
+if "q" not in st.session_state:
+    st.session_state.q = queue.Queue()
+if "outbox" not in st.session_state:
+    st.session_state.outbox = queue.Queue()
+if "state" not in st.session_state:
+    st.session_state.state = None
+if "online" not in st.session_state:
+    st.session_state.online = []
+if "player_id" not in st.session_state:
+    st.session_state.player_id = None
+if "name" not in st.session_state:
+    st.session_state.name = None
+if "page" not in st.session_state:
+    st.session_state.page = "landing"
+if "ws_started" not in st.session_state:
+    st.session_state.ws_started = False
 
 # ---------- websocket thread ----------
 def ws_thread(q, outbox):
@@ -43,6 +49,29 @@ def start_ws():
             daemon=True,
         ).start()
         st.session_state.ws_started = True
+
+def reset_session():
+    st.session_state.q = queue.Queue()
+    st.session_state.outbox = queue.Queue()
+    st.session_state.state = None
+    st.session_state.online = []
+    st.session_state.player_id = None
+    st.session_state.name = None
+    st.session_state.page = "landing"
+    st.session_state.ws_started = False
+
+def drain_queue():
+    """Pull all pending WS messages into session state."""
+    while not st.session_state.q.empty():
+        msg = st.session_state.q.get()
+        if msg["type"] == "welcome":
+            st.session_state.player_id = msg["player_id"]
+            st.session_state.name = msg["name"]
+        elif msg["type"] == "state":
+            st.session_state.state = msg["state"]
+            st.session_state.online = msg.get("online", [])
+        elif msg["type"] == "error":
+            st.error(f"Connection error: {msg['msg']}")
 
 # ---------- CSS ----------
 st.markdown("""
@@ -71,17 +100,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------- LANDING ----------
-def landing():
-    st.markdown("""
-    <div class="hero">
-      <h1>🎮 GRID CLASH</h1>
-      <p>Two players. One grid. Infinite swagger.</p>
-      <div class="badge">🟣 Play a human if one shows up · otherwise a friendly AI</div>
-    </div>
-    """, unsafe_allow_html=True)
+@st.fragment(run_every=0.5)
+def online_board():
+    drain_queue()
 
-    # Online players board
-    st.subheader("👥 Who's online")
     online = st.session_state.online
     if not online:
         st.info("No players online right now. You could be the first! 🚀")
@@ -95,18 +117,31 @@ def landing():
         else:
             st.caption("Ready to play — someone else is here!")
 
+def landing():
+    # Connect immediately so online list is live even before clicking Play
+    start_ws()
+
+    st.markdown("""
+    <div class="hero">
+      <h1>🎮 GRID CLASH</h1>
+      <p>Two players. One grid. Infinite swagger.</p>
+      <div class="badge">🟣 Play a human if one shows up · otherwise a friendly AI</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.subheader("👥 Who's online")
+    online_board()
+
     st.divider()
 
     col1, col2 = st.columns(2)
     with col1:
         if st.button("👥 Wait for a human", use_container_width=True, type="primary"):
-            start_ws()
             st.session_state.page = "waiting"
             st.session_state.outbox.put({"type": "set_mode", "mode": "auto"})
             st.rerun()
     with col2:
         if st.button("🤖 Play AI now", use_container_width=True):
-            start_ws()
             st.session_state.page = "waiting_ai"
             st.session_state.outbox.put({"type": "set_mode", "mode": "ai_now"})
             st.rerun()
@@ -119,36 +154,24 @@ def landing():
         - Hit **Exit** any time to leave.
         """)
 
-# ---------- WAITING (before game renders) ----------
+# ---------- WAITING ----------
 @st.fragment(run_every=0.5)
 def waiting_fragment():
-    # Drain queue
-    while not st.session_state.q.empty():
-        msg = st.session_state.q.get()
-        if msg["type"] == "welcome":
-            st.session_state.player_id = msg["player_id"]
-            st.session_state.name = msg["name"]
-        elif msg["type"] == "state":
-            st.session_state.state = msg["state"]
-            st.session_state.online = msg.get("online", [])
-        elif msg["type"] == "error":
-            st.error(f"Connection error: {msg['msg']}")
-            return
+    drain_queue()
 
     state = st.session_state.state
-    if state is None:
+    pid = st.session_state.player_id
+
+    if not isinstance(state, dict) or "players" not in state or pid is None:
         st.info("Connecting…")
         return
 
-    if st.session_state.player_id in state["players"]:
+    if pid in state["players"] or state.get("vs_ai"):
         st.session_state.page = "game"
         st.rerun()
+        return
 
-    if state["vs_ai"]:
-        st.session_state.page = "game"
-        st.rerun()
-
-    st.markdown(f"### 🟡 Waiting for an opponent…")
+    st.markdown("### 🟡 Waiting for an opponent…")
     st.write(f"You are **{st.session_state.name}**")
     online = st.session_state.online
     st.write(f"Players online: **{len(online)}**")
@@ -162,48 +185,37 @@ def waiting_fragment():
     with col2:
         if st.button("🚪 Cancel", use_container_width=True):
             st.session_state.outbox.put({"type": "exit"})
-            st.session_state.page = "landing"
-            st.session_state.ws_started = False
-            st.session_state.state = None
-            st.session_state.q = queue.Queue()
-            st.session_state.outbox = queue.Queue()
+            reset_session()
             st.rerun()
 
 # ---------- GAME ----------
 @st.fragment(run_every=0.5)
 def game_fragment():
-    while not st.session_state.q.empty():
-        msg = st.session_state.q.get()
-        if msg["type"] == "welcome":
-            st.session_state.player_id = msg["player_id"]
-            st.session_state.name = msg["name"]
-        elif msg["type"] == "state":
-            st.session_state.state = msg["state"]
-            st.session_state.online = msg.get("online", [])
+    drain_queue()
 
     state = st.session_state.state
     pid = st.session_state.player_id
+
+    if not isinstance(state, dict) or "players" not in state or pid is None:
+        st.info("Connecting…")
+        return
 
     st.markdown(
         f"**You:** <span class='name-tag'>🧑 {st.session_state.name or '…'}</span>",
         unsafe_allow_html=True,
     )
 
-    if state is None or pid is None:
-        st.info("Connecting…")
-        return
     if pid not in state["players"]:
         st.warning("Game full — try another tab.")
         if st.button("⬅️ Back to lobby"):
-            st.session_state.page = "landing"
+            reset_session()
             st.rerun()
         return
 
     my_sym = "X" if state["players"].index(pid) == 0 else "O"
 
-    if state["vs_ai"]:
-        st.info(f"🤖 No human found — playing vs **{state['ai_name']}** (O)")
-        opp_name = state["ai_name"]
+    if state.get("vs_ai"):
+        st.info(f"🤖 No human found — playing vs **{state.get('ai_name', 'AI')}** (O)")
     else:
         opp_ids = [p for p in state["players"] if p != pid]
         opp_name = state["names"].get(opp_ids[0], "?") if opp_ids else "waiting…"
@@ -234,14 +246,7 @@ def game_fragment():
     with col2:
         if st.button("🚪 Exit", use_container_width=True):
             st.session_state.outbox.put({"type": "exit"})
-            st.session_state.page = "landing"
-            st.session_state.ws_started = False
-            st.session_state.state = None
-            st.session_state.player_id = None
-            st.session_state.name = None
-            st.session_state.online = []
-            st.session_state.q = queue.Queue()
-            st.session_state.outbox = queue.Queue()
+            reset_session()
             st.rerun()
 
 # ---------- ROUTER ----------
