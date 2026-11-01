@@ -21,17 +21,16 @@ async def broadcast():
         "type": "state",
         "state": STATE,
         "online": online,
-        "waiting": len(STATE["players"]) == 1 and not STATE["vs_ai"],
     })
-    await asyncio.gather(*(ws.send(payload) for ws in CLIENTS), return_exceptions=True)
+    if CLIENTS:
+        await asyncio.gather(*(ws.send(payload) for ws in CLIENTS), return_exceptions=True)
 
 async def maybe_start_ai():
     global AI_TASK, STATE
     try:
         await asyncio.sleep(3)
-        humans = list(STATE["players"])
-        if len(humans) == 1 and not STATE["vs_ai"] and STATE["winner"] is None:
-            STATE = start_ai_game(STATE, humans[0], "hard")
+        if len(STATE["players"]) == 1 and not STATE["vs_ai"] and STATE["winner"] is None:
+            STATE = start_ai_game(STATE, STATE["players"][0], "hard")
             await broadcast()
     except asyncio.CancelledError:
         pass
@@ -43,10 +42,12 @@ async def handler(ws):
     player_id = str(uuid.uuid4())[:8]
     CLIENTS[ws] = player_id
 
+    # If AI mode is active but a real human joins, replace AI
     if STATE["vs_ai"] and len(STATE["players"]) == 1:
         AI_TASK and AI_TASK.cancel()
         AI_TASK = None
         fresh = new_game()
+        # Preserve existing names
         for pid in STATE["players"]:
             fresh["names"][pid] = STATE["names"].get(pid, pid)
         fresh["players"] = list(STATE["players"])
@@ -56,16 +57,18 @@ async def handler(ws):
         join(STATE, player_id)
         NAMES[player_id] = STATE["names"].get(player_id, "?")
 
-        if len(STATE["players"]) == 1 and not STATE["vs_ai"] and MODE == "auto":
-            AI_TASK and AI_TASK.cancel()
-            AI_TASK = asyncio.create_task(maybe_start_ai())
-
+    # Send welcome and immediately broadcast state so client doesn't hang
     await ws.send(json.dumps({
         "type": "welcome",
         "player_id": player_id,
         "name": STATE["names"].get(player_id, "?"),
     }))
     await broadcast()
+
+    # Only start the AI timer if we have 1 player and are in auto mode
+    if len(STATE["players"]) == 1 and not STATE["vs_ai"] and MODE == "auto":
+        AI_TASK and AI_TASK.cancel()
+        AI_TASK = asyncio.create_task(maybe_start_ai())
 
     try:
         async for raw in ws:
@@ -84,8 +87,7 @@ async def handler(ws):
                 for pid in list(CLIENTS.values()):
                     join(fresh, pid, STATE["names"].get(pid))
                 if len(CLIENTS) == 1:
-                    fresh = start_ai_game(fresh, next(iter(CLIENTS.values())),
-                                          STATE.get("ai_difficulty", "hard"))
+                    fresh = start_ai_game(fresh, next(iter(CLIENTS.values())), "hard")
                 STATE = fresh
                 AI_TASK and AI_TASK.cancel()
                 if len(CLIENTS) == 1 and MODE == "auto":
@@ -93,7 +95,6 @@ async def handler(ws):
                 await broadcast()
 
             elif msg["type"] == "play_ai":
-                # Player clicked "Play AI now" (from landing or waiting screen)
                 AI_TASK and AI_TASK.cancel()
                 AI_TASK = None
                 difficulty = msg.get("difficulty", "hard")
