@@ -1,13 +1,10 @@
 import streamlit as st
 from supabase import create_client, Client
-import asyncio, json, queue, threading, time, datetime, random
-import websockets
+import time, random, datetime, json
 
 # ==========================================
-# 1. SETUP & CONNECTIONS
+# 1. SUPABASE SETUP
 # ==========================================
-
-# Supabase (Emojis)
 SUPABASE_URL = "https://gxdpjxpzyivzlvwyfaoj.supabase.co"
 SUPABASE_KEY = "sb_publishable_TQWFXwkHlR90wtnp50z0Dg_zGHKpo5g"
 
@@ -15,10 +12,6 @@ SUPABASE_KEY = "sb_publishable_TQWFXwkHlR90wtnp50z0Dg_zGHKpo5g"
 def init_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase = init_supabase()
-
-# WebSocket (Game)
-# ⚠️ MAKE SURE THIS IS YOUR RENDER URL ⚠️
-WS_URL = "wss://your-render-url-here.onrender.com" 
 
 st.set_page_config(page_title="Grid Clash", page_icon="🎮", layout="centered")
 
@@ -45,62 +38,64 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 3. SESSION STATE & HELPER FUNCTIONS
+# 3. AI LOGIC (Minimax)
 # ==========================================
-if "q" not in st.session_state: st.session_state.q = queue.Queue()
-if "outbox" not in st.session_state: st.session_state.outbox = queue.Queue()
-if "state" not in st.session_state: st.session_state.state = None
-if "online" not in st.session_state: st.session_state.online = []
-if "player_id" not in st.session_state: st.session_state.player_id = None
-if "name" not in st.session_state: st.session_state.name = None
-if "page" not in st.session_state: st.session_state.page = "landing"
-if "ws_started" not in st.session_state: st.session_state.ws_started = False
-if "difficulty" not in st.session_state: st.session_state.difficulty = "hard"
+def check_win(b, sym):
+    for i in range(3):
+        if all(b[i][j] == sym for j in range(3)): return True
+        if all(b[j][i] == sym for j in range(3)): return True
+    if all(b[i][i] == sym for i in range(3)): return True
+    if all(b[i][2-i] == sym for i in range(3)): return True
+    return False
 
-def ws_thread(q, outbox):
-    async def run():
-        try:
-            async with websockets.connect(WS_URL) as ws:
-                async def sender():
-                    loop = asyncio.get_event_loop()
-                    while True:
-                        msg = await loop.run_in_executor(None, outbox.get)
-                        await ws.send(json.dumps(msg))
-                asyncio.create_task(sender())
-                async for raw in ws: q.put(json.loads(raw))
-        except Exception as e: q.put({"type": "error", "msg": str(e)})
+def get_ai_move(board, ai_sym, difficulty="hard"):
+    human_sym = "X" if ai_sym == "O" else "O"
+    empties = [(r, c) for r in range(3) for c in range(3) if board[r][c] == "."]
+    if not empties: return None
+    if difficulty == "easy": return random.choice(empties)
+    
+    def minimax(b, depth, is_max, alpha, beta):
+        if check_win(b, ai_sym): return 10 - depth
+        if check_win(b, human_sym): return -10 + depth
+        if all(b[r][c] != "." for r in range(3) for c in range(3)): return 0
+        
+        if is_max:
+            best = -float("inf")
+            for r in range(3):
+                for c in range(3):
+                    if b[r][c] == ".":
+                        b[r][c] = ai_sym
+                        val = minimax(b, depth + 1, False, alpha, beta)
+                        b[r][c] = "."
+                        best = max(best, val); alpha = max(alpha, best)
+                        if beta <= alpha: break
+            return best
+        else:
+            best = float("inf")
+            for r in range(3):
+                for c in range(3):
+                    if b[r][c] == ".":
+                        b[r][c] = human_sym
+                        val = minimax(b, depth + 1, True, alpha, beta)
+                        b[r][c] = "."
+                        best = min(best, val); beta = min(beta, best)
+                        if beta <= alpha: break
+            return best
 
-def start_ws():
-    if not st.session_state.ws_started:
-        threading.Thread(target=ws_thread, args=(st.session_state.q, st.session_state.outbox), daemon=True).start()
-        st.session_state.ws_started = True
+    best_score = -float("inf"); best_move = None
+    for r, c in empties:
+        board[r][c] = ai_sym
+        score = minimax(board, 0, False, -float("inf"), float("inf"))
+        board[r][c] = "."
+        if score > best_score:
+            best_score = score; best_move = (r, c)
+    return best_move
 
-def reset_session():
-    st.session_state.q = queue.Queue()
-    st.session_state.outbox = queue.Queue()
-    st.session_state.state = None
-    st.session_state.online = []
-    st.session_state.player_id = None
-    st.session_state.name = None
-    st.session_state.page = "landing"
-    st.session_state.ws_started = False
-
-def drain_queue():
-    while not st.session_state.q.empty():
-        msg = st.session_state.q.get()
-        if msg["type"] == "welcome":
-            st.session_state.player_id = msg["player_id"]
-            st.session_state.name = msg["name"]
-        elif msg["type"] == "state":
-            st.session_state.state = msg["state"]
-            st.session_state.online = msg.get("online", [])
-        elif msg["type"] == "error":
-            st.error(f"Connection error: {msg['msg']}")
-
-# --- Emoji Functions ---
+# ==========================================
+# 4. EMOJI FUNCTIONS
+# ==========================================
 def send_emoji(emoji_char):
-    try:
-        supabase.table("emojis").insert({"emoji": emoji_char}).execute()
+    try: supabase.table("emojis").insert({"emoji": emoji_char}).execute()
     except Exception: pass
 
 def get_recent_emojis():
@@ -112,71 +107,29 @@ def get_recent_emojis():
     except Exception: return []
 
 # ==========================================
-# 4. LANDING PAGE
+# 5. GAME LOGIC (Supabase)
 # ==========================================
-@st.fragment(run_every=0.5)
-def online_board():
-    drain_queue()
-    if not st.session_state.online: st.info("No players online right now. You could be the first! 🚀")
-    else:
-        for p in st.session_state.online:
-            is_me = p["id"] == st.session_state.player_id
-            st.markdown(f"🟢 **{p['name']}**" + (" *(you)*" if is_me else ""))
+if "difficulty" not in st.session_state: st.session_state.difficulty = "hard"
+if "in_game" not in st.session_state: st.session_state.in_game = False
 
-@st.dialog("Choose AI difficulty")
-def difficulty_dialog():
-    choice = st.radio("Difficulty", ["easy", "medium", "hard"], index=["easy", "medium", "hard"].index(st.session_state.difficulty), horizontal=True)
-    if st.button("Start AI game", type="primary", use_container_width=True):
-        st.session_state.difficulty = choice
-        st.session_state.page = "waiting_ai"
-        st.session_state.outbox.put({"type": "play_ai", "difficulty": choice})
-        st.rerun()
+def reset_game():
+    empty_board = [[".", ".", "."], [".", ".", "."], [".", ".", "."]]
+    supabase.table("game_state").update({"board": empty_board, "turn": "X", "winner": None}).eq("id", 1).execute()
 
 def landing():
-    start_ws()
-    st.markdown("<div class='hero'><h1>🎮 GRID CLASH</h1><p>Two players. One grid. Infinite swagger.</p></div>", unsafe_allow_html=True)
-    st.subheader("👥 Who's online")
-    online_board()
-    st.divider()
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("👥 Wait for a human", use_container_width=True, type="primary"):
-            st.session_state.page = "waiting"
-            st.rerun()
-    with col2:
-        if st.button("🤖 Play AI now", use_container_width=True): difficulty_dialog()
-
-# ==========================================
-# 5. WAITING PAGE
-# ==========================================
-@st.fragment(run_every=0.5)
-def waiting_fragment():
-    drain_queue()
-    state = st.session_state.state
-    pid = st.session_state.player_id
-    if isinstance(state, dict) and "players" in state and pid is not None:
-        if pid in state["players"] or state.get("vs_ai"):
-            st.session_state.page = "game"
-            st.rerun()
-            return
-    st.markdown("### 🟡 Waiting for an opponent…")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🤖 Play AI instead", use_container_width=True): difficulty_dialog()
-    with col2:
-        if st.button("🚪 Cancel", use_container_width=True):
-            st.session_state.outbox.put({"type": "exit"})
-            reset_session()
-            st.rerun()
-
-# ==========================================
-# 6. THE GAME PAGE (With Emojis!)
-# ==========================================
-@st.fragment(run_every=0.5)
-def game_fragment():
-    drain_queue()
+    st.markdown("<div class='hero'><h1>🎮 GRID CLASH</h1><p>Play vs the AI.</p></div>", unsafe_allow_html=True)
     
-    # --- RENDER FLOATING EMOJIS ---
+    diff = st.radio("Difficulty", ["easy", "medium", "hard"], horizontal=True, index=2)
+    st.session_state.difficulty = diff
+    
+    if st.button("🚀 Start Game", use_container_width=True, type="primary"):
+        reset_game()
+        st.session_state.in_game = True
+        st.rerun()
+
+@st.fragment(run_every=1.0)
+def game_fragment():
+    # 1. Render Floating Emojis
     recent_emojis = get_recent_emojis()
     html_output = ""
     for row in recent_emojis:
@@ -184,41 +137,50 @@ def game_fragment():
         if emoji:
             left_pos = random.randint(10, 90)
             html_output += f'<div class="floating-emoji" style="left: {left_pos}vw;">{emoji}</div>'
-    if html_output:
-        st.markdown(html_output, unsafe_allow_html=True)
-    # ------------------------------
+    if html_output: st.markdown(html_output, unsafe_allow_html=True)
 
-    state = st.session_state.state
-    pid = st.session_state.player_id
-
-    if not isinstance(state, dict) or "players" not in state or pid is None:
-        st.info("Connecting…")
+    # 2. Fetch Game State
+    res = supabase.table("game_state").select("*").eq("id", 1).execute()
+    if not res.data: 
+        st.error("Could not load game.")
         return
+    game = res.data[0]
+    board = game["board"]
 
-    st.markdown(f"**You:** <span class='name-tag'>🧑 {st.session_state.name}</span>", unsafe_allow_html=True)
-    my_sym = "X" if state["players"].index(pid) == 0 else "O"
-
-    if state.get("vs_ai"):
-        st.info(f"🤖 Playing vs **{state.get('ai_name', 'AI')}** ({state.get('ai_difficulty')})")
+    st.markdown("**You:** 🧑 You (X)  |  **Opponent:** 🤖 AI (O)", unsafe_allow_html=True)
+    
+    if game["winner"]:
+        st.success(f"🏆 Winner: {game['winner']}")
     else:
-        opp = [p for p in state["players"] if p != pid]
-        st.success(f"👥 Playing vs **{state['names'].get(opp[0], '?') if opp else 'waiting...'}**")
+        st.write(f"Turn: **{game['turn']}**")
 
-    st.write(f"Turn: **{state['turn']}**")
-    if state["winner"]: st.success(f"🏆 Winner: **{state['winner']}**")
-
-    # Render the Tic-Tac-Toe Board
-    my_turn = (state["turn"] == my_sym and not state["winner"])
+    # 3. Render Board
+    my_turn = (game["turn"] == "X" and not game["winner"])
     for r in range(3):
         cols = st.columns(3)
         for c in range(3):
-            cell = state["board"][r][c]
+            cell = board[r][c]
             if cols[c].button("·" if cell == "." else cell, key=f"c{r}{c}", use_container_width=True, disabled=not my_turn or cell != "."):
-                st.session_state.outbox.put({"type": "move", "row": r, "col": c})
+                # Player Move
+                board[r][c] = "X"
+                winner = "X" if check_win(board, "X") else ("draw" if all(cell != "." for row in board for cell in row) else None)
+                supabase.table("game_state").update({"board": board, "turn": "O" if not winner else "X", "winner": winner}).eq("id", 1).execute()
+                st.rerun()
+
+    # 4. AI Move
+    if game["turn"] == "O" and not game["winner"]:
+        time.sleep(0.6) # Fake thinking delay
+        ai_move = get_ai_move(board, "O", st.session_state.difficulty)
+        if ai_move:
+            r, c = ai_move
+            board[r][c] = "O"
+            winner = "O" if check_win(board, "O") else ("draw" if all(cell != "." for row in board for cell in row) else None)
+            supabase.table("game_state").update({"board": board, "turn": "X" if not winner else "O", "winner": winner}).eq("id", 1).execute()
+            st.rerun()
 
     st.divider()
     
-    # Emoji Buttons inside the game
+    # 5. Emoji Reactions
     st.write("**Send a reaction:**")
     e1, e2, e3, e4 = st.columns(4)
     if e1.button("🔥", use_container_width=True): send_emoji("🔥")
@@ -227,15 +189,14 @@ def game_fragment():
     if e4.button("🚀", use_container_width=True): send_emoji("🚀")
 
     st.divider()
-    if st.button("🚪 Exit Game", use_container_width=True):
-        st.session_state.outbox.put({"type": "exit"})
-        reset_session()
+    if st.button("🚪 Exit to Lobby", use_container_width=True):
+        st.session_state.in_game = False
         st.rerun()
 
 # ==========================================
-# 7. ROUTER
+# 6. ROUTER
 # ==========================================
-page = st.session_state.page
-if page == "landing": landing()
-elif page in ("waiting", "waiting_ai"): waiting_fragment()
-elif page == "game": game_fragment()
+if not st.session_state.in_game:
+    landing()
+else:
+    game_fragment()
